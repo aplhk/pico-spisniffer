@@ -1,0 +1,58 @@
+.program spi_sniffer
+.side_set 1                ; sideset pin1 = debug_pin
+
+; ---
+
+.wrap_target                      ; jmp_pin = clk
+wait_clk:
+    SET X, 16              side 0 ; timeout counter
+wait_clk_loop:
+    JMP PIN read           side 0 ; jump if clk High (active-high)
+    JMP X--, wait_clk_loop side 0 ; loop for 2 * 16 cycle (~118 nanosecond at 270mhz?)
+timeout:
+    push                   side 0 ; timeout push and set all zero
+    WAIT 1 PIN 2           side 0 ; wait clock high
+read:
+    IN PINS, 1             side 1 ; read from MOSI
+    WAIT 0 PIN 2           side 1 ; wait clock low
+.wrap
+
+; ---
+
+% c-sdk {
+static inline void spi_sniffer_program_init(PIO pio, uint sm, uint offset, uint pin_base, uint debug_pin) {
+    pio_sm_config c = spi_sniffer_program_get_default_config(offset);
+    
+    pio_gpio_init(pio, pin_base + 0); // MISO
+    pio_gpio_init(pio, pin_base + 1); // MOSI (unused)
+    pio_gpio_init(pio, pin_base + 2); // CLK
+    pio_gpio_init(pio, pin_base + 3); // CSn (unused)
+
+    pio_gpio_init(pio, debug_pin);
+
+    // Set all 4 pins to input (false = input)
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_base, 4, false);
+    sm_config_set_in_pins(&c, pin_base);
+
+    // set CLK as jmp pin (EXECCTRL_JMP_PIN)
+    sm_config_set_jmp_pin(&c, pin_base + 2);
+    
+    // Set debug pin as sideset output (true = output)
+    pio_sm_set_consecutive_pindirs(pio, sm, debug_pin, 1, true); 
+    sm_config_set_sideset_pins(&c, debug_pin);
+
+    // shift-left (isr)
+    // |1234|
+    // |  56|
+    // in uint32_t
+    // |    ||    ||  56||1234|
+    sm_config_set_in_shift(&c, false, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    
+    // run the SM at system clock speed
+    sm_config_set_clkdiv(&c, 1.0);
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
